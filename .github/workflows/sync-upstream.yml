@@ -1,0 +1,86 @@
+# Merges each new Aidoku release into `personal` and keeps TestFlight builds
+# fresh. Every push to `personal` starts the Xcode Cloud workflow.
+name: Sync upstream release
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Pushing a merge that touches .github/workflows needs a token with the
+      # `workflow` scope, which GITHUB_TOKEN never has.
+      HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: personal
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge latest upstream release
+        run: |
+          set -euo pipefail
+          tag=$(gh release list -R Aidoku/Aidoku --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')
+          [ -n "$tag" ] || { echo "::error::No upstream release found"; exit 1; }
+          git fetch --quiet --no-tags https://github.com/Aidoku/Aidoku.git "+refs/tags/$tag:refs/tags/$tag"
+
+          if git merge-base --is-ancestor "$tag" HEAD; then
+            echo "personal already contains $tag, nothing to merge"
+            exit 0
+          fi
+
+          if ! git merge --no-edit "$tag"; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+            title="Upstream $tag does not merge cleanly into personal"
+            open=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq 'length')
+            if [ "$open" = 0 ]; then
+              gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$(cat <<EOF
+          The daily sync could not merge upstream release \`$tag\` into \`personal\`. Nothing was pushed, so TestFlight keeps the previous release.
+
+          Conflicting files:
+          $(printf -- '- `%s`\n' $conflicts)
+
+          Resolve the merge locally as described in README-personal.md, push \`personal\`, then close this issue.
+
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+              )"
+            fi
+            echo "::error::$title"
+            exit 1
+          fi
+
+          [ "$HAS_SYNC_TOKEN" = true ] || { echo "::error::SYNC_TOKEN secret is missing, cannot push the merge of $tag"; exit 1; }
+          git push origin personal
+          echo "Merged $tag into personal"
+
+      # TestFlight builds expire after 90 days, and GitHub disables scheduled
+      # workflows after 60 days without activity: rebuild well before both.
+      - name: Keepalive rebuild
+        run: |
+          set -euo pipefail
+          age_days=$(( ($(date +%s) - $(git log -1 --format=%ct)) / 86400 ))
+          echo "Last commit on personal is $age_days days old"
+          [ "$age_days" -ge 45 ] || exit 0
+
+          [ "$HAS_SYNC_TOKEN" = true ] || { echo "::error::SYNC_TOKEN secret is missing, cannot push the keepalive commit"; exit 1; }
+          git commit --allow-empty -m "chore: keepalive rebuild"
+          git push origin personal
