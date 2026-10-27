@@ -56,7 +56,7 @@ index ae7d0939..3b1bcfbc 100644
                      Text(NSLocalizedString("TAP_ZONES"))
                  }
 diff --git a/Aidoku/Features/Reader/Readers/Paged/ReaderPagedViewController.swift b/Aidoku/Features/Reader/Readers/Paged/ReaderPagedViewController.swift
-index 08ae3907..4c69270c 100644
+index 08ae3907..4ada4264 100644
 --- a/Aidoku/Features/Reader/Readers/Paged/ReaderPagedViewController.swift
 +++ b/Aidoku/Features/Reader/Readers/Paged/ReaderPagedViewController.swift
 @@ -19,7 +19,8 @@ class ReaderPagedViewController: BaseObservingViewController {
@@ -69,7 +69,7 @@ index 08ae3907..4c69270c 100644
                  pageViewController.remove()
                  pageViewController = makePageViewController()
                  configure()
-@@ -39,6 +40,10 @@ class ReaderPagedViewController: BaseObservingViewController {
+@@ -39,6 +40,13 @@ class ReaderPagedViewController: BaseObservingViewController {
      }
  
      private var splitWideImages = UserDefaults.standard.bool(forKey: "Reader.splitWideImages")
@@ -77,22 +77,27 @@ index 08ae3907..4c69270c 100644
 +    private var usesPageCurl: Bool {
 +        pageCurlEnabled && readingMode != .vertical
 +    }
++    // Two pages curling around a middle spine, like an open book. The page view
++    // controller then pairs single pages itself, so usesDoublePages stays off.
++    private var usesMidSpine = false
      private var isolatedPages: Set<Int> = []
      private var manuallyIsolatedPages: Set<Int> = []
      private lazy var pagesToPreload = UserDefaults.standard.integer(forKey: "Reader.pagesToPreload")
-@@ -64,7 +69,21 @@ class ReaderPagedViewController: BaseObservingViewController {
+@@ -64,7 +72,23 @@ class ReaderPagedViewController: BaseObservingViewController {
      private lazy var pageViewController = makePageViewController()
  
      func makePageViewController() -> UIPageViewController {
 -        UIPageViewController(
 +        if usesPageCurl {
-+            // right-to-left pages are bound on the right, like a printed manga
-+            let spineLocation: UIPageViewController.SpineLocation = readingMode == .rtl ? .max : .min
++            // two pages turn around the middle; a single right-to-left page is
++            // bound on the right, like a printed manga
++            let spineLocation: UIPageViewController.SpineLocation = usesMidSpine ? .mid : (readingMode == .rtl ? .max : .min)
 +            let pageViewController = UIPageViewController(
 +                transitionStyle: .pageCurl,
 +                navigationOrientation: .horizontal,
 +                options: [.spineLocation: NSNumber(value: spineLocation.rawValue)]
 +            )
++            pageViewController.isDoubleSided = usesMidSpine
 +            // taps are handled by the reader (bars, tap zones)
 +            for recognizer in pageViewController.gestureRecognizers where recognizer is UITapGestureRecognizer {
 +                recognizer.isEnabled = false
@@ -103,7 +108,7 @@ index 08ae3907..4c69270c 100644
              transitionStyle: .scroll,
              navigationOrientation: readingMode == .vertical ? .vertical : .horizontal,
              options: nil
-@@ -98,6 +117,15 @@ class ReaderPagedViewController: BaseObservingViewController {
+@@ -98,6 +122,15 @@ class ReaderPagedViewController: BaseObservingViewController {
              self.updatePageLayout()
              self.move(toPage: self.currentPage, animated: false)
          }
@@ -119,6 +124,165 @@ index 08ae3907..4c69270c 100644
          addObserver(forName: "Reader.pagesToPreload") { [weak self] notification in
              self?.pagesToPreload = notification.object as? Int
                  ?? UserDefaults.standard.integer(forKey: "Reader.pagesToPreload")
+@@ -185,6 +218,22 @@ class ReaderPagedViewController: BaseObservingViewController {
+                 default: return false
+             }
+         }()
++        applyPageCurlSpine()
++    }
++
++    // With page curl, a two-page layout turns around a middle spine
++    private func applyPageCurlSpine() {
++        let midSpine = usesPageCurl && usesDoublePages
++        if midSpine {
++            usesDoublePages = false
++        }
++        guard midSpine != usesMidSpine else { return }
++        usesMidSpine = midSpine
++        pageViewController.remove()
++        pageViewController = makePageViewController()
++        pageViewController.delegate = self
++        pageViewController.dataSource = self
++        add(child: pageViewController)
+     }
+ 
+     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+@@ -192,6 +241,7 @@ class ReaderPagedViewController: BaseObservingViewController {
+ 
+         if usesAutoPageLayout {
+             usesDoublePages = size.width > size.height
++            applyPageCurlSpine()
+             refreshChapter(startPage: currentPage)
+         }
+     }
+@@ -407,7 +457,7 @@ extension ReaderPagedViewController {
+ 
+         let previousViewControllers = pageViewController.viewControllers ?? []
+         pageViewController.setViewControllers(
+-            [targetViewController],
++            usesMidSpine ? midSpinePair(around: vcIndex) : [targetViewController],
+             direction: forward ? .forward : .reverse,
+             animated: animated
+         ) { completed in
+@@ -420,6 +470,44 @@ extension ReaderPagedViewController {
+         }
+     }
+ 
++    /// The two pages shown around a middle spine, left page first.
++    private func midSpinePair(around index: Int) -> [UIViewController] {
++        let page = pageIndex(from: index)
++        let first = spreadStart(for: page) == page ? index : index - 1
++        let lower = pageViewControllers[safe: first] ?? ReaderBlankPageViewController()
++        let higher = pageViewControllers[safe: first + 1] ?? ReaderBlankPageViewController()
++        return readingMode == .rtl ? [higher, lower] : [lower, higher]
++    }
++
++    /// Turns a whole spread around the middle spine, like a swipe would.
++    private func turnSpread(forward: Bool) {
++        guard !isTransitioning, let current = pageViewController.viewControllers, current.count == 2 else { return }
++        let pair: [UIViewController]
++        if forward {
++            guard
++                let left = pageViewController(pageViewController, viewControllerAfter: current[1]),
++                !(left is ReaderBlankPageViewController)
++            else { return }
++            pair = [left, pageViewController(pageViewController, viewControllerAfter: left) ?? ReaderBlankPageViewController()]
++        } else {
++            guard
++                let right = pageViewController(pageViewController, viewControllerBefore: current[0]),
++                !(right is ReaderBlankPageViewController)
++            else { return }
++            pair = [pageViewController(pageViewController, viewControllerBefore: right) ?? ReaderBlankPageViewController(), right]
++        }
++        isTransitioning = true
++        let animated = UserDefaults.standard.bool(forKey: "Reader.animatePageTransitions")
++        pageViewController.setViewControllers(pair, direction: forward ? .forward : .reverse, animated: animated) { completed in
++            self.pageViewController(
++                self.pageViewController,
++                didFinishAnimating: true,
++                previousViewControllers: current,
++                transitionCompleted: completed
++            )
++        }
++    }
++
+     func loadPage(at index: Int) {
+         guard index > 0, index <= displayPageCount else { return }
+ 
+@@ -839,6 +927,9 @@ extension ReaderPagedViewController {
+ // MARK: - Reader Delegate
+ extension ReaderPagedViewController: ReaderReaderDelegate {
+     func moveLeft() {
++        if usesMidSpine {
++            return turnSpread(forward: false)
++        }
+         guard !isTransitioning else { return }
+         if
+             let currentViewController = pageViewController.viewControllers?.first,
+@@ -862,6 +953,9 @@ extension ReaderPagedViewController: ReaderReaderDelegate {
+     }
+ 
+     func moveRight() {
++        if usesMidSpine {
++            return turnSpread(forward: true)
++        }
+         guard !isTransitioning else { return }
+         if
+             let currentViewController = pageViewController.viewControllers?.last,
+@@ -993,8 +1087,9 @@ extension ReaderPagedViewController: UIPageViewControllerDelegate {
+ 
+         guard
+             completed,
+-            let viewController = pageViewController.viewControllers?.first,
+-            let currentIndex = getIndex(of: viewController, pos: .first),
++            let currentIndex = usesMidSpine
++                ? pageViewController.viewControllers?.compactMap({ getIndex(of: $0) }).min()
++                : pageViewController.viewControllers?.first.flatMap({ getIndex(of: $0, pos: .first) }),
+             pagesToPreload > 0
+         else {
+             return
+@@ -1109,6 +1204,10 @@ extension ReaderPagedViewController: UIPageViewControllerDelegate {
+ extension ReaderPagedViewController: UIPageViewControllerDataSource {
+ 
+     func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter viewController: UIViewController) -> UIViewController? {
++        if usesMidSpine {
++            let next = readingMode == .rtl ? getPageController(before: viewController) : getPageController(after: viewController)
++            return next ?? blankPage(beside: viewController)
++        }
+         switch readingMode {
+             case .rtl:
+                 return getPageController(before: viewController)
+@@ -1120,6 +1219,10 @@ extension ReaderPagedViewController: UIPageViewControllerDataSource {
+     }
+ 
+     func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore viewController: UIViewController) -> UIViewController? {
++        if usesMidSpine {
++            let previous = readingMode == .rtl ? getPageController(after: viewController) : getPageController(before: viewController)
++            return previous ?? blankPage(beside: viewController)
++        }
+         switch readingMode {
+             case .rtl:
+                 return getPageController(after: viewController)
+@@ -1130,6 +1233,11 @@ extension ReaderPagedViewController: UIPageViewControllerDataSource {
+         }
+     }
+ 
++    // A spread needs two pages: a blank one fills the side past the first or last page
++    private func blankPage(beside viewController: UIViewController) -> UIViewController? {
++        viewController is ReaderBlankPageViewController ? nil : ReaderBlankPageViewController()
++    }
++
+     func getPageController(after viewController: UIViewController) -> UIViewController? {
+         guard let currentIndex = getIndex(of: viewController, pos: .second) else {
+             return nil
+@@ -1460,3 +1568,7 @@ extension ReaderPagedViewController {
+         Self.splitPosition[key] = (page, offset)
+     }
+ }
++
++/// Fills the empty side of a two-page spread at either end of a chapter.
++/// Like the reader's own pages, it has no background of its own.
++private final class ReaderBlankPageViewController: UIViewController {}
 diff --git a/Aidoku/Features/Settings/Settings.swift b/Aidoku/Features/Settings/Settings.swift
 index 74de895f..ae404087 100644
 --- a/Aidoku/Features/Settings/Settings.swift
