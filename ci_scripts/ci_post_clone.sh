@@ -29,6 +29,22 @@ for f in "$XCCONFIG" "$PBXPROJ" "$INFOPLIST"; do
   [[ -f "$f" ]] || fail "missing $f (did the upstream layout change?)"
 done
 
+# Optional features of this build live in ci_scripts/patches, so upstream files
+# stay untouched in git. A patch that no longer applies after an upstream
+# release is skipped: the build still ships, without that feature. The daily
+# sync opens an issue when that happens.
+for patch in "$ROOT"/ci_scripts/patches/*.patch; do
+  [[ -e "$patch" ]] || continue
+  name=$(basename "$patch")
+  if git -C "$ROOT" apply --reverse --check "$patch" 2>/dev/null; then
+    echo "Patch $name already applied"
+  elif git -C "$ROOT" apply "$patch"; then
+    echo "Patch $name applied"
+  else
+    echo "warning: patch $name does not apply to this upstream version, skipped" >&2
+  fi
+done
+
 # Bundle ID. The iCloud container and BGTask identifiers derive from it.
 grep -qE '^PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=' "$XCCONFIG" \
   || fail "no PRODUCT_BUNDLE_IDENTIFIER line in $XCCONFIG"

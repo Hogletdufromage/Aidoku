@@ -72,6 +72,37 @@ jobs:
           git push origin personal
           echo "Merged $tag into personal"
 
+      # The build skips any patch in ci_scripts/patches that no longer applies:
+      # report those, so the feature can be fixed instead of silently missing.
+      - name: Check build-time patches
+        run: |
+          set -euo pipefail
+          failed=()
+          for patch in ci_scripts/patches/*.patch; do
+            [ -e "$patch" ] || continue
+            git apply --check "$patch" || failed+=("$patch")
+          done
+          if [ ${#failed[@]} -eq 0 ]; then
+            echo "All build-time patches apply"
+            exit 0
+          fi
+
+          title="Build-time patches no longer apply"
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq 'length')
+          if [ "$open" = 0 ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" --body "$(cat <<EOF
+          These patches no longer apply to \`personal\`. Xcode Cloud skips them, so TestFlight builds ship without the features they add.
+
+          $(printf -- '- `%s`\n' "${failed[@]}")
+
+          Regenerate each patch against the current upstream code, push \`personal\`, then close this issue.
+
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+            )"
+          fi
+          echo "::warning::$title: ${failed[*]}"
+
       # TestFlight builds expire after 90 days, and GitHub disables scheduled
       # workflows after 60 days without activity: rebuild well before both.
       - name: Keepalive rebuild

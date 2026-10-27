@@ -1,0 +1,137 @@
+diff --git a/Aidoku/App/AppDelegate.swift b/Aidoku/App/AppDelegate.swift
+index 4efe4737..211456b0 100644
+--- a/Aidoku/App/AppDelegate.swift
++++ b/Aidoku/App/AppDelegate.swift
+@@ -124,6 +124,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
+                 "Reader.tapZones": "disabled",
+                 "Reader.invertTapZones": false,
+                 "Reader.animatePageTransitions": true,
++                "Reader.pageCurl": false,
+                 "Reader.backgroundColor": "black",
+                 "Reader.pagesToPreload": 2,
+                 "Reader.pagedPageLayout": "auto",
+diff --git a/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings b/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings
+index 854aeafd..dbe67ee4 100644
+--- a/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings
++++ b/Aidoku/App/Resources/Localization/en.lproj/Localizable.strings
+@@ -579,6 +579,7 @@
+ "DISABLED" = "Disabled";
+ "INVERT_TAP_ZONES" = "Invert Tap Zones";
+ "ANIMATE_PAGE_TRANSITIONS" = "Animate Page Transitions";
++"PAGE_CURL" = "Page Curl";
+ "TEXT_READER" = "Text Reader";
+ "TEXT_READER_STYLE" = "Reader Style";
+ "TEXT_READER_PAGED" = "Paged";
+diff --git a/Aidoku/App/Resources/Localization/fr.lproj/Localizable.strings b/Aidoku/App/Resources/Localization/fr.lproj/Localizable.strings
+index c3de4081..30e27e4f 100644
+--- a/Aidoku/App/Resources/Localization/fr.lproj/Localizable.strings
++++ b/Aidoku/App/Resources/Localization/fr.lproj/Localizable.strings
+@@ -518,6 +518,7 @@
+ "ZONE_LEFT_RIGHT" = "Gauche et droite";
+ "DISABLED" = "Désactivé";
+ "ANIMATE_PAGE_TRANSITIONS" = "Animer les transitions de page";
++"PAGE_CURL" = "Page qui se tourne";
+ "SOURCE_IMPORT_FAIL_TEXT" = "Échec de l’importation de la source. Assurez-vous que votre fichier .aix est valide.";
+ "FILE_IMPORT_FAIL_TEXT" = "Échec de l’importation du fichier. Assurez-vous qu’il s’agit d’une archive CBZ ou ZIP valide contenant des images.";
+ "NAME" = "Nom";
+diff --git a/Aidoku/Features/Reader/ReaderSettingsView.swift b/Aidoku/Features/Reader/ReaderSettingsView.swift
+index ae7d0939..3b1bcfbc 100644
+--- a/Aidoku/Features/Reader/ReaderSettingsView.swift
++++ b/Aidoku/Features/Reader/ReaderSettingsView.swift
+@@ -92,6 +92,16 @@ struct ReaderSettingsView: View {
+                             value: .toggle(.init())
+                         )
+                     )
++
++                    if reader == .paged {
++                        SettingView(
++                            setting: .init(
++                                key: "Reader.pageCurl",
++                                title: NSLocalizedString("PAGE_CURL"),
++                                value: .toggle(.init())
++                            )
++                        )
++                    }
+                 } header: {
+                     Text(NSLocalizedString("TAP_ZONES"))
+                 }
+diff --git a/Aidoku/Features/Reader/Readers/Paged/ReaderPagedViewController.swift b/Aidoku/Features/Reader/Readers/Paged/ReaderPagedViewController.swift
+index 08ae3907..4c69270c 100644
+--- a/Aidoku/Features/Reader/Readers/Paged/ReaderPagedViewController.swift
++++ b/Aidoku/Features/Reader/Readers/Paged/ReaderPagedViewController.swift
+@@ -19,7 +19,8 @@ class ReaderPagedViewController: BaseObservingViewController {
+     var readingMode: ReadingMode = .rtl {
+         didSet(oldValue) {
+             guard readingMode != oldValue else { return }
+-            if readingMode == .vertical || oldValue == .vertical {
++            // the page curl spine side depends on the reading direction
++            if readingMode == .vertical || oldValue == .vertical || pageCurlEnabled {
+                 pageViewController.remove()
+                 pageViewController = makePageViewController()
+                 configure()
+@@ -39,6 +40,10 @@ class ReaderPagedViewController: BaseObservingViewController {
+     }
+ 
+     private var splitWideImages = UserDefaults.standard.bool(forKey: "Reader.splitWideImages")
++    private var pageCurlEnabled = UserDefaults.standard.bool(forKey: "Reader.pageCurl")
++    private var usesPageCurl: Bool {
++        pageCurlEnabled && readingMode != .vertical
++    }
+     private var isolatedPages: Set<Int> = []
+     private var manuallyIsolatedPages: Set<Int> = []
+     private lazy var pagesToPreload = UserDefaults.standard.integer(forKey: "Reader.pagesToPreload")
+@@ -64,7 +69,21 @@ class ReaderPagedViewController: BaseObservingViewController {
+     private lazy var pageViewController = makePageViewController()
+ 
+     func makePageViewController() -> UIPageViewController {
+-        UIPageViewController(
++        if usesPageCurl {
++            // right-to-left pages are bound on the right, like a printed manga
++            let spineLocation: UIPageViewController.SpineLocation = readingMode == .rtl ? .max : .min
++            let pageViewController = UIPageViewController(
++                transitionStyle: .pageCurl,
++                navigationOrientation: .horizontal,
++                options: [.spineLocation: NSNumber(value: spineLocation.rawValue)]
++            )
++            // taps are handled by the reader (bars, tap zones)
++            for recognizer in pageViewController.gestureRecognizers where recognizer is UITapGestureRecognizer {
++                recognizer.isEnabled = false
++            }
++            return pageViewController
++        }
++        return UIPageViewController(
+             transitionStyle: .scroll,
+             navigationOrientation: readingMode == .vertical ? .vertical : .horizontal,
+             options: nil
+@@ -98,6 +117,15 @@ class ReaderPagedViewController: BaseObservingViewController {
+             self.updatePageLayout()
+             self.move(toPage: self.currentPage, animated: false)
+         }
++        addObserver(forName: "Reader.pageCurl") { [weak self] _ in
++            guard let self else { return }
++            self.pageCurlEnabled = UserDefaults.standard.bool(forKey: "Reader.pageCurl")
++            guard self.readingMode != .vertical else { return }
++            self.pageViewController.remove()
++            self.pageViewController = self.makePageViewController()
++            self.configure()
++            self.refreshChapter(startPage: self.currentPage)
++        }
+         addObserver(forName: "Reader.pagesToPreload") { [weak self] notification in
+             self?.pagesToPreload = notification.object as? Int
+                 ?? UserDefaults.standard.integer(forKey: "Reader.pagesToPreload")
+diff --git a/Aidoku/Features/Settings/Settings.swift b/Aidoku/Features/Settings/Settings.swift
+index 74de895f..ae404087 100644
+--- a/Aidoku/Features/Settings/Settings.swift
++++ b/Aidoku/Features/Settings/Settings.swift
+@@ -487,6 +487,11 @@ extension Settings {
+                     key: "Reader.animatePageTransitions",
+                     title: NSLocalizedString("ANIMATE_PAGE_TRANSITIONS"),
+                     value: .toggle(.init())
++                ),
++                .init(
++                    key: "Reader.pageCurl",
++                    title: NSLocalizedString("PAGE_CURL"),
++                    value: .toggle(.init())
+                 )
+             ]))
+         ),
